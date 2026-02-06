@@ -3,114 +3,116 @@ import requests
 import re
 import pandas as pd
 from geopy.distance import geodesic
+from datetime import datetime
 
 # --- Setup ---
-st.set_page_config(page_title="High-Accuracy Project Finder", layout="wide")
+st.set_page_config(page_title="Pune/PCMC Project Finder", layout="wide")
 
 def get_exact_coords(url):
-    """
-    Ultra-robust coordinate extraction. 
-    Follows redirects and checks multiple hidden patterns.
-    """
-    headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'}
+    """Handles redirects for googleusercontent and short links."""
+    headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)'}
     try:
+        # Follow redirects to get the actual Google Maps URL
         session = requests.Session()
         response = session.get(url, allow_redirects=True, timeout=15, headers=headers)
         final_url = response.url
         
-        # Pattern 1: Look for the 'center' parameter in the URL (most accurate for area views)
-        center_match = re.search(r"center=(-?\d+\.\d+)%2C(-?\d+\.\d+)", final_url)
-        if center_match:
-            return float(center_match.group(1)), float(center_match.group(2))
-
-        # Pattern 2: Standard @lat,long
+        # Look for standard @lat,long
         at_match = re.search(r"@(-?\d+\.\d+),(-?\d+\.\d+)", final_url)
         if at_match:
             return float(at_match.group(1)), float(at_match.group(2))
             
-        # Pattern 3: Internal !3d !4d tags
+        # Look for !3d and !4d internal tags
         lat_m = re.search(r"!3d(-?\d+\.\d+)", final_url)
         lon_m = re.search(r"!4d(-?\d+\.\d+)", final_url)
         if lat_m and lon_m:
-            return float(lat_m.group(1)), float(lon_m.group(2))
-            
-    except Exception:
+            return float(lat_m.group(1)), float(lat_m.group(2))
+    except Exception as e:
+        print(f"Error resolving link: {e}")
         return None, None
     return None, None
 
-def fetch_pune_projects(lat, lon, radius_km):
-    """Pulls live residential data from OpenStreetMap for Pune/PCMC."""
+def scrape_completion_date(project_name):
+    """Scrapes snippets for completion months/years (2024-2031)."""
+    if "Unnamed" in project_name or "Complex" in project_name:
+        return "Ready/Resale"
+    
+    try:
+        # Target search specifically for Pune real estate timelines
+        query = f"{project_name} Pune possession date completion"
+        url = f"https://www.google.com/search?q={query.replace(' ', '+')}"
+        headers = {'User-Agent': 'Mozilla/5.0'}
+        r = requests.get(url, headers=headers, timeout=5)
+        
+        # Find years 2024-2031 and month names
+        years = re.findall(r"202[4-9]|203[0-1]", r.text)
+        months = re.findall(r"(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)[a-z]*", r.text, re.I)
+        
+        if years:
+            est_year = max(set(years), key=years.count) # Find most frequent year
+            est_month = months[0].capitalize() if months else "Possession"
+            return f"{est_month} {est_year}"
+    except:
+        pass
+    return "Check Website"
+
+def fetch_nearby_projects(lat, lon, radius_km):
+    """Pulls all residential nodes from OpenStreetMap."""
     overpass_url = "http://overpass-api.de/api/interpreter"
     radius_meters = radius_km * 1000
-    
-    # Query targets: Apartments, Residential zones, and Construction sites
     query = f"""
-    [out:json][timeout:25];
+    [out:json];
     (
       node["building"="apartments"](around:{radius_meters},{lat},{lon});
       way["building"="apartments"](around:{radius_meters},{lat},{lon});
       node["building"="construction"](around:{radius_meters},{lat},{lon});
-      way["building"="construction"](around:{radius_meters},{lat},{lon});
-      node["residential"="apartment"](around:{radius_meters},{lat},{lon});
     );
     out center;
     """
     try:
-        r = requests.get(overpass_url, params={'data': query})
-        data = r.json()
+        response = requests.get(overpass_url, params={'data': query}, timeout=20)
+        elements = response.json().get('elements', [])
         
-        results = []
-        for e in data.get('elements', []):
-            tags = e.get('tags', {})
-            name = tags.get('name') or tags.get('description') or "Residential Complex/Site"
-            
-            # Get coords based on element type
+        projects = []
+        for e in elements:
+            name = e.get('tags', {}).get('name', 'Unnamed Project')
             p_lat = e.get('lat') or e.get('center', {}).get('lat')
             p_lon = e.get('lon') or e.get('center', {}).get('lon')
             
             if p_lat and p_lon:
-                # Calculate precise distance
                 dist = geodesic((lat, lon), (p_lat, p_lon)).km
-                results.append({
-                    "Project/Building Name": name,
-                    "Distance (km)": round(dist, 2),
-                    "lat": p_lat,
-                    "lon": p_lon
-                })
-        return results
+                projects.append({"Name": name, "Distance (km)": round(dist, 2), "lat": p_lat, "lon": p_lon})
+        return projects
     except:
         return []
 
-# --- UI ---
-st.title("🏙️ Accurate Pune/PCMC Project Finder")
-st.markdown("Retrieves all residential developments within your chosen radius.")
+# --- Streamlit Interface ---
+st.title("🏙️ Pune/PCMC Residential Timeline Scraper")
+st.markdown("Paste your map link below to find all nearby residential projects and their estimated completion dates.")
 
-link = st.text_input("Paste Google Maps Link:")
-radius = st.slider("Select Search Radius (km)", 2, 20, 5)
+maps_link = st.text_input("Google Maps Link:", placeholder="Paste http://googleusercontent.com... or standard maps link")
+radius = st.slider("Search Radius (km)", 2, 20, 5)
 
-if link:
-    with st.spinner("Calculating exact location..."):
-        lat, lon = get_exact_coords(link)
+if maps_link:
+    with st.spinner("Resolving link and scanning Pune area..."):
+        lat, lon = get_exact_coords(maps_link)
         
         if lat and lon:
-            st.success(f"Pinpointed Location: {lat}, {lon}")
+            raw_data = fetch_nearby_projects(lat, lon, radius)
             
-            raw_results = fetch_pune_projects(lat, lon, radius)
-            
-            if raw_results:
-                # Clean up: Sort by distance and remove generic duplicates
-                df = pd.DataFrame(raw_results).sort_values("Distance (km)")
-                df = df.drop_duplicates(subset=['Project/Building Name'])
+            if raw_data:
+                # Remove duplicates and generic names
+                df = pd.DataFrame(raw_data).drop_duplicates(subset=['Name']).sort_values("Distance (km)")
+                # Filter top results to keep scraping fast
+                df_top = df[df['Name'] != "Unnamed Project"].head(10)
                 
-                # Filter out generic 'Unnamed' to show high-quality results first
-                named_projects = df[df['Project/Building Name'] != "Residential Complex/Site"]
-                unnamed_projects = df[df['Project/Building Name'] == "Residential Complex/Site"]
-                final_df = pd.concat([named_projects, unnamed_projects])
-
-                st.subheader(f"Found {len(final_df)} Results within {radius}km")
-                st.dataframe(final_df[["Project/Building Name", "Distance (km)"]], use_container_width=True)
-                st.map(final_df)
+                st.info(f"Scanning the web for completion dates of the top {len(df_top)} closest projects...")
+                df_top['Completion Date'] = df_top['Name'].apply(scrape_completion_date)
+                
+                st.subheader("Residential Projects & Estimated Timelines")
+                st.dataframe(df_top[['Name', 'Distance (km)', 'Completion Date']], use_container_width=True)
+                st.map(df_top)
             else:
-                st.warning("No residential sites found in this specific radius.")
+                st.warning("No projects found in this radius. Try increasing the search distance.")
         else:
-            st.error("Invalid Link. Please ensure you've copied the full link from Google Maps.")
+            st.error("Invalid Link. Please ensure you've copied the full URL from your browser.")
