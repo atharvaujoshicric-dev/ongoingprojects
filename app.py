@@ -3,9 +3,10 @@ import requests
 import re
 import pandas as pd
 from geopy.distance import geodesic
+from datetime import datetime
 
 # --- Setup ---
-st.set_page_config(page_title="Ongoing Pune Projects", layout="wide")
+st.set_page_config(page_title="Pune Project Estimator", layout="wide")
 
 def get_exact_coords(url):
     headers = {'User-Agent': 'Mozilla/5.0'}
@@ -21,93 +22,78 @@ def get_exact_coords(url):
     except: return None, None
     return None, None
 
-def scrape_completion_date(project_name):
+def estimate_completion(project_name):
     """
-    Scrapes the web for specific possession/completion keywords 
-    associated with the project name in Pune/PCMC.
+    Scrapes search snippets to find dates like 'Dec 2025' or 'June 2027'.
     """
-    if "Unnamed" in project_name: return "Unknown"
+    if "Residential" in project_name or "Complex" in project_name:
+        return "Ready/Unknown"
     
     try:
-        # Search specifically for possession timelines
-        query = f"{project_name} Pune PCMC possession date completion year"
-        search_url = f"https://www.google.com/search?q={query.replace(' ', '+')}"
+        # Searching specifically for Pune real estate timelines
+        search_url = f"https://www.google.com/search?q={project_name}+pune+completion+date+possession"
         headers = {'User-Agent': 'Mozilla/5.0'}
         r = requests.get(search_url, headers=headers, timeout=5)
+        text = r.text
         
-        # Regex to find dates like 'Dec 2026', 'March 2028', etc.
-        # Looks for Year (2025-2032) and Month names
-        date_pattern = r"(Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)[a-z]*[\s,-]*(202[5-9]|203[0-2])"
-        match = re.search(date_pattern, r.text, re.IGNORECASE)
+        # Regex to find Year (2024-2030) and Months
+        years = re.findall(r"202[4-9]|2030", text)
+        months = re.findall(r"Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec|January|February|March|April|May|June|July|August|September|October|November|December", text, re.I)
         
-        if match:
-            return f"{match.group(1).capitalize()} {match.group(2)}"
-        
-        # Fallback for just the year
-        year_only = re.search(r"possession (202[5-9]|203[0-2])", r.text, re.IGNORECASE)
-        if year_only:
-            return f"Year {year_only.group(1)}"
-            
+        if years:
+            est_year = max(set(years), key=years.count) # Mode of years found
+            est_month = months[0].capitalize() if months else "Possession"
+            return f"{est_month} {est_year}"
     except:
         pass
-    return "TBA (Ongoing)"
+    return "Check Website"
 
-def fetch_ongoing_projects(lat, lon, radius_km):
-    """
-    Filters specifically for tags: 
-    building=construction OR landuse=construction
-    """
+def fetch_projects(lat, lon, radius_km):
     overpass_url = "http://overpass-api.de/api/interpreter"
     query = f"""
     [out:json][timeout:25];
     (
+      node["building"="apartments"](around:{radius_km*1000},{lat},{lon});
+      way["building"="apartments"](around:{radius_km*1000},{lat},{lon});
       node["building"="construction"](around:{radius_km*1000},{lat},{lon});
       way["building"="construction"](around:{radius_km*1000},{lat},{lon});
-      node["landuse"="construction"](around:{radius_km*1000},{lat},{lon});
-      way["landuse"="construction"](around:{radius_km*1000},{lat},{lon});
     );
     out center;
     """
-    try:
-        r = requests.get(overpass_url, params={'data': query})
-        elements = r.json().get('elements', [])
+    r = requests.get(overpass_url, params={'data': query})
+    data = r.json()
+    
+    results = []
+    for e in data.get('elements', []):
+        tags = e.get('tags', {})
+        name = tags.get('name') or "Unnamed Site"
+        p_lat = e.get('lat') or e.get('center', {}).get('lat')
+        p_lon = e.get('lon') or e.get('center', {}).get('lon')
         
-        results = []
-        for e in elements:
-            tags = e.get('tags', {})
-            # Prefer 'construction' tag which often contains the final project name
-            name = tags.get('name') or tags.get('construction') or "New Project Site"
-            p_lat = e.get('lat') or e.get('center', {}).get('lat')
-            p_lon = e.get('lon') or e.get('center', {}).get('lon')
-            
-            if p_lat and p_lon:
-                dist = geodesic((lat, lon), (p_lat, p_lon)).km
-                results.append({"Name": name, "Distance": round(dist, 2), "lat": p_lat, "lon": p_lon})
-        return results
-    except:
-        return []
+        if p_lat and p_lon:
+            dist = geodesic((lat, lon), (p_lat, p_lon)).km
+            results.append({"Name": name, "Distance": round(dist, 2), "lat": p_lat, "lon": p_lon})
+    return results
 
-# --- Streamlit UI ---
-st.title("🚧 Pune/PCMC Ongoing Project Tracker")
-st.markdown("This tool filters for **active construction sites only** and estimates their completion.")
-
+# --- UI ---
+st.title("🏗️ Pune/PCMC Project Timeline Tracker")
 link = st.text_input("Paste Google Maps Link:")
-radius = st.slider("Search Radius (km)", 2, 20, 5)
+radius = st.slider("Radius (km)", 2, 20, 5)
 
 if link:
     lat, lon = get_exact_coords(link)
     if lat and lon:
-        st.success(f"Scanning {radius}km around: {lat}, {lon}")
-        data = fetch_ongoing_projects(lat, lon, radius)
+        st.success(f"Pinpointed Location: {lat}, {lon}")
+        data = fetch_projects(lat, lon, radius)
         
         if data:
             df = pd.DataFrame(data).drop_duplicates(subset=['Name']).sort_values("Distance")
+            df = df[df['Name'] != "Unnamed Site"].head(10) # Limit to top 10 for speed
             
-            with st.spinner("Analyzing completion dates for ongoing sites..."):
-                df['Est. Completion'] = df['Name'].apply(scrape_completion_date)
+            with st.spinner("Scraping completion dates for nearby projects..."):
+                df['Estimated Completion'] = df['Name'].apply(estimate_completion)
             
-            st.subheader(f"Found {len(df)} Active Construction Projects")
-            st.table(df[['Name', 'Distance', 'Est. Completion']])
+            st.table(df[['Name', 'Distance', 'Estimated Completion']])
             st.map(df)
         else:
-            st.warning("No active construction sites tagged in this specific radius.")
+            st.warning("No projects found.")
