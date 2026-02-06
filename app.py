@@ -3,116 +3,111 @@ import requests
 import re
 import pandas as pd
 from geopy.distance import geodesic
-from datetime import datetime
 
 # --- Setup ---
-st.set_page_config(page_title="Pune/PCMC Project Finder", layout="wide")
+st.set_page_config(page_title="Ongoing Pune Projects", layout="wide")
 
 def get_exact_coords(url):
-    """Handles redirects for googleusercontent and short links."""
-    headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)'}
+    headers = {'User-Agent': 'Mozilla/5.0'}
     try:
-        # Follow redirects to get the actual Google Maps URL
         session = requests.Session()
-        response = session.get(url, allow_redirects=True, timeout=15, headers=headers)
+        response = session.get(url, allow_redirects=True, timeout=10, headers=headers)
         final_url = response.url
-        
-        # Look for standard @lat,long
         at_match = re.search(r"@(-?\d+\.\d+),(-?\d+\.\d+)", final_url)
-        if at_match:
-            return float(at_match.group(1)), float(at_match.group(2))
-            
-        # Look for !3d and !4d internal tags
+        if at_match: return float(at_match.group(1)), float(at_match.group(2))
         lat_m = re.search(r"!3d(-?\d+\.\d+)", final_url)
         lon_m = re.search(r"!4d(-?\d+\.\d+)", final_url)
-        if lat_m and lon_m:
-            return float(lat_m.group(1)), float(lat_m.group(2))
-    except Exception as e:
-        print(f"Error resolving link: {e}")
-        return None, None
+        if lat_m and lon_m: return float(lat_m.group(1)), float(lat_m.group(2))
+    except: return None, None
     return None, None
 
 def scrape_completion_date(project_name):
-    """Scrapes snippets for completion months/years (2024-2031)."""
-    if "Unnamed" in project_name or "Complex" in project_name:
-        return "Ready/Resale"
+    """
+    Scrapes the web for specific possession/completion keywords 
+    associated with the project name in Pune/PCMC.
+    """
+    if "Unnamed" in project_name: return "Unknown"
     
     try:
-        # Target search specifically for Pune real estate timelines
-        query = f"{project_name} Pune possession date completion"
-        url = f"https://www.google.com/search?q={query.replace(' ', '+')}"
+        # Search specifically for possession timelines
+        query = f"{project_name} Pune PCMC possession date completion year"
+        search_url = f"https://www.google.com/search?q={query.replace(' ', '+')}"
         headers = {'User-Agent': 'Mozilla/5.0'}
-        r = requests.get(url, headers=headers, timeout=5)
+        r = requests.get(search_url, headers=headers, timeout=5)
         
-        # Find years 2024-2031 and month names
-        years = re.findall(r"202[4-9]|203[0-1]", r.text)
-        months = re.findall(r"(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)[a-z]*", r.text, re.I)
+        # Regex to find dates like 'Dec 2026', 'March 2028', etc.
+        # Looks for Year (2025-2032) and Month names
+        date_pattern = r"(Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)[a-z]*[\s,-]*(202[5-9]|203[0-2])"
+        match = re.search(date_pattern, r.text, re.IGNORECASE)
         
-        if years:
-            est_year = max(set(years), key=years.count) # Find most frequent year
-            est_month = months[0].capitalize() if months else "Possession"
-            return f"{est_month} {est_year}"
+        if match:
+            return f"{match.group(1).capitalize()} {match.group(2)}"
+        
+        # Fallback for just the year
+        year_only = re.search(r"possession (202[5-9]|203[0-2])", r.text, re.IGNORECASE)
+        if year_only:
+            return f"Year {year_only.group(1)}"
+            
     except:
         pass
-    return "Check Website"
+    return "TBA (Ongoing)"
 
-def fetch_nearby_projects(lat, lon, radius_km):
-    """Pulls all residential nodes from OpenStreetMap."""
+def fetch_ongoing_projects(lat, lon, radius_km):
+    """
+    Filters specifically for tags: 
+    building=construction OR landuse=construction
+    """
     overpass_url = "http://overpass-api.de/api/interpreter"
-    radius_meters = radius_km * 1000
     query = f"""
-    [out:json];
+    [out:json][timeout:25];
     (
-      node["building"="apartments"](around:{radius_meters},{lat},{lon});
-      way["building"="apartments"](around:{radius_meters},{lat},{lon});
-      node["building"="construction"](around:{radius_meters},{lat},{lon});
+      node["building"="construction"](around:{radius_km*1000},{lat},{lon});
+      way["building"="construction"](around:{radius_km*1000},{lat},{lon});
+      node["landuse"="construction"](around:{radius_km*1000},{lat},{lon});
+      way["landuse"="construction"](around:{radius_km*1000},{lat},{lon});
     );
     out center;
     """
     try:
-        response = requests.get(overpass_url, params={'data': query}, timeout=20)
-        elements = response.json().get('elements', [])
+        r = requests.get(overpass_url, params={'data': query})
+        elements = r.json().get('elements', [])
         
-        projects = []
+        results = []
         for e in elements:
-            name = e.get('tags', {}).get('name', 'Unnamed Project')
+            tags = e.get('tags', {})
+            # Prefer 'construction' tag which often contains the final project name
+            name = tags.get('name') or tags.get('construction') or "New Project Site"
             p_lat = e.get('lat') or e.get('center', {}).get('lat')
             p_lon = e.get('lon') or e.get('center', {}).get('lon')
             
             if p_lat and p_lon:
                 dist = geodesic((lat, lon), (p_lat, p_lon)).km
-                projects.append({"Name": name, "Distance (km)": round(dist, 2), "lat": p_lat, "lon": p_lon})
-        return projects
+                results.append({"Name": name, "Distance": round(dist, 2), "lat": p_lat, "lon": p_lon})
+        return results
     except:
         return []
 
-# --- Streamlit Interface ---
-st.title("🏙️ Pune/PCMC Residential Timeline Scraper")
-st.markdown("Paste your map link below to find all nearby residential projects and their estimated completion dates.")
+# --- Streamlit UI ---
+st.title("🚧 Pune/PCMC Ongoing Project Tracker")
+st.markdown("This tool filters for **active construction sites only** and estimates their completion.")
 
-maps_link = st.text_input("Google Maps Link:", placeholder="Paste http://googleusercontent.com... or standard maps link")
+link = st.text_input("Paste Google Maps Link:")
 radius = st.slider("Search Radius (km)", 2, 20, 5)
 
-if maps_link:
-    with st.spinner("Resolving link and scanning Pune area..."):
-        lat, lon = get_exact_coords(maps_link)
+if link:
+    lat, lon = get_exact_coords(link)
+    if lat and lon:
+        st.success(f"Scanning {radius}km around: {lat}, {lon}")
+        data = fetch_ongoing_projects(lat, lon, radius)
         
-        if lat and lon:
-            raw_data = fetch_nearby_projects(lat, lon, radius)
+        if data:
+            df = pd.DataFrame(data).drop_duplicates(subset=['Name']).sort_values("Distance")
             
-            if raw_data:
-                # Remove duplicates and generic names
-                df = pd.DataFrame(raw_data).drop_duplicates(subset=['Name']).sort_values("Distance (km)")
-                # Filter top results to keep scraping fast
-                df_top = df[df['Name'] != "Unnamed Project"].head(10)
-                
-                st.info(f"Scanning the web for completion dates of the top {len(df_top)} closest projects...")
-                df_top['Completion Date'] = df_top['Name'].apply(scrape_completion_date)
-                
-                st.subheader("Residential Projects & Estimated Timelines")
-                st.dataframe(df_top[['Name', 'Distance (km)', 'Completion Date']], use_container_width=True)
-                st.map(df_top)
-            else:
-                st.warning("No projects found in this radius. Try increasing the search distance.")
+            with st.spinner("Analyzing completion dates for ongoing sites..."):
+                df['Est. Completion'] = df['Name'].apply(scrape_completion_date)
+            
+            st.subheader(f"Found {len(df)} Active Construction Projects")
+            st.table(df[['Name', 'Distance', 'Est. Completion']])
+            st.map(df)
         else:
-            st.error("Invalid Link. Please ensure you've copied the full URL from your browser.")
+            st.warning("No active construction sites tagged in this specific radius.")
