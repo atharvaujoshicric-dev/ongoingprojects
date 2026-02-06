@@ -144,5 +144,3 @@ if st.session_state.final_df is not None:
 
     st.dataframe(df[["Project/Building Name", "Distance (km)", "Completion Date"]], use_container_width=True)
     st.map(df)
-
----
